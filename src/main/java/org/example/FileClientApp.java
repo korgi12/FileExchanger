@@ -10,9 +10,13 @@ import javafx.scene.control.TextArea;
 import javafx.scene.layout.VBox;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
+import org.apache.commons.lang3.ArrayUtils;
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
 
 import java.io.*;
 import java.net.Socket;
+import java.util.Base64;
 import java.util.concurrent.*;
 
 public class FileClientApp extends Application {
@@ -28,14 +32,14 @@ public class FileClientApp extends Application {
     }
 
     private Socket socket;
-    private ObjectOutputStream oos;
-    private ObjectInputStream ois;
+    private BufferedWriter out;
+    private BufferedReader in;
 
     @Override
     public void start(Stage primaryStage) throws IOException {
         this.socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
-        this.oos = new ObjectOutputStream(socket.getOutputStream());
-        this.ois = new ObjectInputStream(socket.getInputStream());
+        this.in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        this.out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
 
         primaryStage.setTitle("File Transfer Client");
 
@@ -62,21 +66,23 @@ public class FileClientApp extends Application {
         File file = fileChooser.showOpenDialog(stage);
         if (file != null) {
             try (FileInputStream fis = new FileInputStream(file)) {
-
-                oos.writeObject("SEND");
-                oos.writeObject(file.getName());
+                Request req = new Request();
+                req.setAction("SEND");
+                req.setNameFile(file.getName());
 
                 byte[] buffer = new byte[4096];
                 int bytesRead;
                 while ((bytesRead = fis.read(buffer)) != -1) {
-                    oos.write(buffer, 0, bytesRead);
+                    req.setData(buffer);
                 }
-                oos.flush();
+                out.write(req.toJson());
+                out.newLine();
+                out.flush();
 
                 // Read response from the server
-                String serverResponse = (String) ois.readObject();
-                statusLabel.setText("Status: " + serverResponse);
-            } catch (IOException | ClassNotFoundException e) {
+//                String serverResponse = (String) ois.readObject();
+//                statusLabel.setText("Status: " + serverResponse);
+            } catch (IOException e) {
                 statusLabel.setText("Status: Error sending file.");
                 e.printStackTrace();
             }
@@ -88,19 +94,19 @@ public class FileClientApp extends Application {
 
         Future<Void> future = executor.submit(() -> {
             try {
-                oos.writeObject("RECEIVE");
+                Request req = new Request();
+                req.setAction("RECEIVE");
+                out.write(req.toJson());
+                out.newLine();
+                out.flush();
 
-                String fileName = (String) ois.readObject();
-                long fileSize =  ois.readLong();
-                File receivedFile = new File("received_Client_" + fileName);
+                String jsonClient = in.readLine();
+                Request request  = parseRequest(jsonClient);
+
+
+                File receivedFile = new File("received_Client_" + request.getNameFile());
                 try (FileOutputStream fos = new FileOutputStream(receivedFile)) {
-                    byte[] buffer = new byte[4096];
-                    long totalBytesRead = 0;
-                    int bytesRead;
-                    while (totalBytesRead < fileSize && (bytesRead = ois.read(buffer)) != -1) {
-                        fos.write(buffer, 0, bytesRead);
-                        totalBytesRead += bytesRead;
-                    }
+                    fos.write(request.getData());
                 }
 
                 // Read the file content to display in the TextArea
@@ -116,7 +122,7 @@ public class FileClientApp extends Application {
                     messageArea.setText(fileContent.toString());
                     statusLabel.setText("Status: File received successfully.");
                 });
-            } catch (IOException | ClassNotFoundException e) {
+            } catch (IOException e) {
                 Platform.runLater(() -> statusLabel.setText("Status: Error receiving file."));
                 e.printStackTrace();
             }
@@ -133,6 +139,21 @@ public class FileClientApp extends Application {
             e.printStackTrace();
         } finally {
             executor.shutdown();
+        }
+    }
+    private Request parseRequest(String requestJson) {
+        try {
+            JSONParser parser = new JSONParser();
+            JSONObject json = (JSONObject) parser.parse(requestJson);
+
+            String action = (String) json.get("action");
+            String nameFile = (String) json.get("nameFile");
+            String base64Data = (String) json.get("data");
+            byte[] data = Base64.getDecoder().decode(base64Data);
+            return new Request(action,nameFile, ArrayUtils.removeAllOccurences(data, (byte) 0));
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
         }
     }
 }
